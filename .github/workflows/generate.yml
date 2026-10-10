@@ -1,0 +1,66 @@
+name: Generate 3D Model
+
+on:
+  issues:
+    types: [opened, edited]
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    if: contains(github.event.issue.title, '3D Generation')
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install git+https://github.com/VAST-AI-Research/TripoSR.git
+          pip install trimesh Pillow requests
+      - name: Process image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python -c "
+          import re, requests, os
+          from PIL import Image
+          import torch
+          from tsr.system import TSR
+          from tsr.utils import remove_background, resize_foreground
+
+          body = os.environ.get('ISSUE_BODY', '')
+          token = os.environ.get('GH_TOKEN', '')
+          urls = re.findall(r'https://[^\s\)\"]+\.(?:png|jpg|jpeg|webp)', body, re.IGNORECASE)
+          if not urls: exit(1)
+          r = requests.get(urls[0], headers={'Authorization': f'token {token}'})
+          open('input.png','wb').write(r.content)
+
+          model = TSR.from_pretrained('stabilityai/TripoSR', config_name='config.yaml', weight_name='model.ckpt')
+          model.renderer.set_chunk_size(131072)
+          model.to('cpu')
+          image = Image.open('input.png').convert('RGBA')
+          image = remove_background(image)
+          image = resize_foreground(image, 0.85)
+          with torch.no_grad():
+              scene_codes = model(image, device='cpu')
+          import os; os.makedirs('output', exist_ok=True)
+          model.exporter(scene_codes)[0].export('output/model.glb')
+          print('Done!')
+          "
+      - uses: actions/upload-artifact@v3
+        with:
+          name: 3d-model
+          path: output/model.glb
+          retention-days: 7
+      - uses: actions/github-script@v6
+        with:
+          script: |
+            const url = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: `✅ النموذج جاهز! [تحميل من هنا](${url}) ← Artifacts ← 3d-model`
+            });
